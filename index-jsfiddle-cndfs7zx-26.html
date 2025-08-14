@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html>
+
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lost, But Well Fed</title>
+
+  <style>
+    html,body{height:100%;margin:0;background:#000;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+  .wrap{position:relative;height:100%;display:grid;place-items:center}
+  canvas{width:min(100vw,100vh*(4/3));height:calc((min(100vw,100vh*(4/3)))*0.75);background:#000}
+  .overlay{position:absolute;inset:0;background:rgba(0,0,0,.9);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px}
+  .btn{background:#111;border:1px solid #444;color:#fff;padding:10px 14px;border-radius:8px;cursor:pointer;font-weight:600}
+  .hudTL,.hudTR{position:absolute;top:10px;font:14px/1 monospace;color:#9ee7ff;white-space:pre}
+  .hudTL{left:10px}.hudTR{right:10px;text-align:right}
+  .hudMsg{position:absolute;left:0;right:0;bottom:10px;text-align:center;font:14px/1 monospace;color:#fff}
+  .touch{position:absolute;inset:auto 0 12px 0;display:flex;justify-content:center;gap:18px}
+  .touch button{width:72px;height:72px;border-radius:12px;border:1px solid #333;background:#0a0a0a;color:#fff;font-size:28px;opacity:.85}
+  @media(hover:hover){.touch{display:none}}
+  .musicToggle{position:absolute;left:10px;top:44px}
+  </style>
+
+  
+</head>
+<body>
+  <div class="wrap">
+  <canvas id="c" width="800" height="600"></canvas>
+
+  <div id="overlay" class="overlay">
+    <div style="text-align:center;max-width:680px;padding:0 18px;">
+      <div style="font-size:28px;font-weight:800;letter-spacing:.5px;margin-bottom:8px;">Lost, But Well Fed</div>
+      <div id="coverTag" style="opacity:.95;margin-bottom:10px;">Hunting flavors beyond Earth’s map.</div>
+      <ul style="text-align:left;line-height:1.6;margin:0 auto 14px;padding-left:18px;max-width:520px;opacity:.9;">
+        <li>Rotate: ← → or A D</li>
+        <li>Thrust: ↑ or W</li>
+        <li>Space: restart / advance after landing</li>
+        <li>M: toggle music</li>
+      </ul>
+    </div>
+    <button id="play" class="btn">Play</button>
+  </div>
+
+  <div class="hudTL" id="hudL"></div>
+  <div class="hudTR" id="hudR"></div>
+  <div class="hudMsg" id="hudMsg"></div>
+
+  <button id="musicBtn" class="btn musicToggle">♪ Music: On</button>
+
+  <div class="touch">
+    <button id="btnL" aria-label="Rotate Left">◀</button>
+    <button id="btnU" aria-label="Thrust Up">▲</button>
+    <button id="btnR" aria-label="Rotate Right">▶</button>
+  </div>
+</div>
+
+  <script>
+    /* ========== Canvas helpers ========== */
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+function setWhite(){ ctx.fillStyle='#fff'; ctx.strokeStyle='#fff'; }
+function line(x1,y1,x2,y2){ ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke(); }
+function poly(pts){ ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x,pts[i].y); ctx.closePath(); ctx.stroke(); }
+
+/* ========== HUD ========== */
+const hudL = document.getElementById('hudL');
+const hudR = document.getElementById('hudR');
+const hudMsg = document.getElementById('hudMsg');
+
+/* ========== State & timing ========== */
+let state="intro", raf=null, lastTs=null, timeSec=0;
+let level=0, score=0, elapsed=0;
+
+/* ========== Physics ========== */
+let gravity=0.010, thrustA=0.090, rotBase=0.022;
+const rotBoost=1.10;
+let limits={ vMax:2.6, hMax:1.3, ang:12*Math.PI/180 };
+
+/* ========== Stars ========== */
+let stars=[];
+function makeStars(n){ stars = Array.from({length:n}, ()=>({x:Math.random()*W,y:Math.random()*H,a:.4+Math.random()*.6,s:Math.random()*.004+.001,p:Math.random()*Math.PI*2})); }
+
+/* ========== Terrain & pads ========== */
+let terrain=[], pads=[];
+function terrainYAt(x){
+  x=Math.max(terrain[0].x,Math.min(x,terrain[terrain.length-1].x));
+  for(let i=0;i<terrain.length-1;i++){ const a=terrain[i], b=terrain[i+1]; if(x>=a.x && x<=b.x){ const t=(x-a.x)/(b.x-a.x); return a.y+t*(b.y-a.y);} }
+  return H;
+}
+function drawSilhouette(){
+  const fillPts=[{x:0,y:H}].concat(terrain).concat([{x:W,y:terrain[terrain.length-1].y},{x:W,y:H}]);
+  ctx.beginPath(); ctx.moveTo(fillPts[0].x, fillPts[0].y);
+  for(let i=1;i<fillPts.length;i++) ctx.lineTo(fillPts[i].x,fillPts[i].y);
+  ctx.closePath(); ctx.fillStyle='#0b0c10'; ctx.fill();
+  setWhite();
+  ctx.lineWidth=2;
+  for(let i=0;i<terrain.length-1;i++){ const a=terrain[i], b=terrain[i+1]; line(a.x,a.y,b.x,b.y); }
+}
+
+/* ========== Levels (PHO, RAMEN, TACOS) ========== */
+const levelDefs=[
+  { name:'PHO', gravity:0.008, thrust:0.092, rot:0.021,
+    limits:{vMax:2.8,hMax:1.6,ang:14*Math.PI/180}, stars:240,
+    terrain:[{x:0,y:565},{x:80,y:545},{x:150,y:555},{x:210,y:545},{x:260,y:540},{x:320,y:530},{x:380,y:520},{x:440,y:525},{x:520,y:535},{x:620,y:555},{x:800,y:575}],
+    pads:[{x1:210,x2:330,y:540,mul:2},{x1:520,x2:560,y:535,mul:3}]
+  },
+  { name:'RAMEN', gravity:0.010, thrust:0.090, rot:0.022,
+    limits:{vMax:2.6,hMax:1.3,ang:12*Math.PI/180}, stars:220,
+    terrain:[{x:0,y:570},{x:60,y:555},{x:130,y:565},{x:200,y:550},{x:260,y:535},{x:320,y:520},{x:380,y:530},{x:460,y:555},{x:560,y:545},{x:640,y:520},{x:720,y:535},{x:800,y:560}],
+    pads:[{x1:120,x2:220,y:565,mul:2},{x1:620,x2:700,y:520,mul:2}]
+  },
+  { name:'TACOS', gravity:0.012, thrust:0.090, rot:0.024,
+    limits:{vMax:2.4,hMax:1.1,ang:10*Math.PI/180}, stars:200,
+    terrain:[{x:0,y:575},{x:70,y:560},{x:120,y:565},{x:180,y:550},{x:230,y:530},{x:260,y:510},{x:300,y:500},{x:340,y:505},{x:380,y:515},{x:420,y:540},{x:450,y:560},{x:520,y:540},{x:600,y:520},{x:700,y:545},{x:800,y:570}],
+    pads:[{x1:350,x2:430,y:515,mul:3},{x1:520,x2:560,y:540,mul:5}]
+  }
+];
+function applyLevel(i){
+  const d=levelDefs[i];
+  level=i;
+  gravity=d.gravity; thrustA=d.thrust; rotBase=d.rot; limits=d.limits;
+  terrain=d.terrain.map(p=>({...p}));
+  pads=d.pads.map(p=>({...p}));
+  makeStars(d.stars);
+  elapsed=0; hudMsg.textContent = `${d.name} level`;
+  if(audioCtx){ setThemeForLevel(d.name); }
+}
+
+/* ========== Lander ========== */
+const lander={ x:W*0.5, y:120, vx:0, vy:0.05, ang:Math.PI/2, thrust:false, left:false, right:false };
+function legLength(){ return 36; }
+function landerFeet(){ return { x: lander.x + Math.cos(lander.ang + Math.PI/2)*legLength(), y: lander.y + Math.sin(lander.ang + Math.PI/2)*legLength() }; }
+
+/* ========== Input ========== */
+const keys={}; const CTRL=new Set(['ArrowLeft','ArrowRight','ArrowUp','Space','KeyA','KeyD','KeyW','KeyQ','KeyE','KeyM']);
+window.addEventListener('keydown',e=>{
+  if(CTRL.has(e.code)) e.preventDefault();
+  if(state!=="intro"){
+    keys[e.code]=true;
+    if(e.code==='Space') reset(true);
+    if(e.code==='KeyM') toggleMusic();
+  }
+});
+window.addEventListener('keyup',e=>{ if(CTRL.has(e.code)) e.preventDefault(); keys[e.code]=false; });
+function bindHold(btn,on,off){ const s=e=>{e.preventDefault();on();}; const u=e=>{e.preventDefault();off();}; btn.addEventListener('pointerdown',s); window.addEventListener('pointerup',u); btn.addEventListener('pointerleave',u); }
+bindHold(document.getElementById('btnL'),()=>lander.left=true,()=>lander.left=false);
+bindHold(document.getElementById('btnU'),()=>lander.thrust=true,()=>lander.thrust=false);
+bindHold(document.getElementById('btnR'),()=>lander.right=true,()=>lander.right=false);
+
+/* ========== Audio (thruster + beeps + MUSIC ENGINE) ========== */
+let audioCtx=null, thrGain=null;
+let musicGain=null, musicOn=true, musicTimer=null;
+
+// Themes
+const THEME = { SPACE:'SPACE', ARCADE:'ARCADE', FOOD:'FOOD' };
+let currentTheme = THEME.SPACE;
+
+function initAudio(){
+  try{
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+
+    // Thruster
+    const thrOsc=audioCtx.createOscillator();
+    thrGain=audioCtx.createGain(); thrGain.gain.value=0;
+    thrOsc.type='sawtooth'; thrOsc.frequency.value=165;
+    thrOsc.connect(thrGain); thrGain.connect(audioCtx.destination); thrOsc.start();
+
+    // Music bus
+    musicGain=audioCtx.createGain(); musicGain.gain.value=0.08;
+    musicGain.connect(audioCtx.destination);
+  }catch(e){ audioCtx=null; }
+}
+function setThruster(on){ if(!audioCtx) return; thrGain.gain.linearRampToValueAtTime(on?0.05:0.0, audioCtx.currentTime+0.03); }
+function beep(f=740,d=0.12){ if(!audioCtx) return; const o=audioCtx.createOscillator(), g=audioCtx.createGain(); o.type='square'; o.frequency.value=f; g.gain.value=0; o.connect(g); g.connect(audioCtx.destination); o.start(); g.gain.linearRampToValueAtTime(0.12,audioCtx.currentTime+0.01); g.gain.linearRampToValueAtTime(0,d); o.stop(audioCtx.currentTime+d+0.02); }
+function crashBeep(){ beep(220,0.14); setTimeout(()=>beep(160,0.14),110); }
+
+// MIDI → Hz
+function mtof(m){ return 440*Math.pow(2,(m-69)/12); }
+
+/* ---- THEME SCHEDULERS ---- */
+const SPACE = { bpm:72,  nextLead:0, nextPad:0,  PAD:[48,55,60,62], LEAD:[72,79,76,84],                  stepL:0, stepP:0 };
+const ARCADE= { bpm:112, nextLead:0, nextBass:0, LEAD:[72,75,79,77,75,72,67,70], BASS:[48,43,48,43,46,41,46,41], stepL:0, stepB:0 };
+const FOOD  = { bpm:96,  nextPluck:0, nextShake:0, PENT:[69,71,74,76,81,86],                              stepP:0 };
+
+function envNote(type, freq, time, dur, vol){
+  const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type=type; o.frequency.setValueAtTime(freq,time);
+  g.gain.setValueAtTime(0, time);
+  g.gain.linearRampToValueAtTime(vol, time+0.01);
+  g.gain.linearRampToValueAtTime(vol*0.6, time+dur*0.4);
+  g.gain.setValueAtTime(vol*0.6, time+dur*0.85);
+  g.gain.linearRampToValueAtTime(0, time+dur);
+  o.connect(g); g.connect(musicGain);
+  o.start(time); o.stop(time+dur+0.02);
+}
+function envNoise(time, dur, vol){
+  const src = audioCtx.createBufferSource();
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate*dur, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i=0;i<data.length;i++) data[i] = (Math.random()*2-1)*0.7;
+  src.buffer = buf;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(vol, time);
+  g.gain.exponentialRampToValueAtTime(0.001, time + dur);
+  src.connect(g); g.connect(musicGain);
+  src.start(time); src.stop(time + 0.02 + dur);
+}
+
+function scheduleSPACE(){
+  const beat = 60/SPACE.bpm, now = audioCtx.currentTime;
+  if(SPACE.nextPad < now + 0.4){
+    const n = SPACE.PAD[SPACE.stepP++ % SPACE.PAD.length];
+    envNote('triangle', mtof(n), SPACE.nextPad, beat*2.8, 0.07);
+    SPACE.nextPad += beat*3;
+  }
+  if(SPACE.nextLead < now + 0.4){
+    const n = SPACE.LEAD[SPACE.stepL++ % SPACE.LEAD.length];
+    envNote('sine', mtof(n), SPACE.nextLead, beat*1.2, 0.08);
+    SPACE.nextLead += beat*2;
+  }
+}
+function scheduleARCADE(){
+  const beat = 60/ARCADE.bpm, now = audioCtx.currentTime;
+  if(ARCADE.nextLead < now + 0.4){
+    const n = ARCADE.LEAD[ARCADE.stepL++ % ARCADE.LEAD.length];
+    envNote('square', mtof(n), ARCADE.nextLead, beat*0.95, 0.12);
+    ARCADE.nextLead += beat;
+  }
+  if(ARCADE.nextBass < now + 0.4){
+    const n = ARCADE.BASS[ARCADE.stepB++ % ARCADE.BASS.length];
+    envNote('triangle', mtof(n), ARCADE.nextBass, beat*1.9, 0.09);
+    ARCADE.nextBass += beat*2;
+  }
+}
+function scheduleFOOD(){
+  const beat = 60/FOOD.bpm, now = audioCtx.currentTime;
+  if(FOOD.nextPluck < now + 0.4){
+    const n = FOOD.PENT[FOOD.stepP++ % FOOD.PENT.length];
+    envNote('sawtooth', mtof(n), FOOD.nextPluck, beat*0.6, 0.10);
+    FOOD.nextPluck += beat*0.75;
+  }
+  if(FOOD.nextShake < now + 0.4){
+    envNoise(FOOD.nextShake, beat*0.25, 0.03);
+    FOOD.nextShake += beat;
+  }
+}
+function scheduleMusic(){
+  if(!audioCtx || !musicOn) return;
+  if(currentTheme==='SPACE') scheduleSPACE();
+  else if(currentTheme==='ARCADE') scheduleARCADE();
+  else scheduleFOOD();
+}
+function startMusic(){
+  if(!audioCtx || !musicOn) return;
+  resetMusicClocks();
+  if(musicTimer) clearInterval(musicTimer);
+  musicTimer = setInterval(scheduleMusic, 90);
+}
+function stopMusic(){ if(musicTimer){ clearInterval(musicTimer); musicTimer=null; } }
+function toggleMusic(){
+  musicOn = !musicOn;
+  document.getElementById('musicBtn').textContent = musicOn ? '♪ Music: On' : '♪ Music: Off';
+  if(!audioCtx) return;
+  if(musicOn) startMusic(); else stopMusic();
+}
+function resetMusicClocks(){
+  const now = audioCtx.currentTime + 0.05;
+  SPACE.nextLead = SPACE.nextPad = now; SPACE.stepL=SPACE.stepP=0;
+  ARCADE.nextLead = ARCADE.nextBass = now; ARCADE.stepL=ARCADE.stepB=0;
+  FOOD.nextPluck = FOOD.nextShake = now; FOOD.stepP=0;
+}
+function setThemeForLevel(name){
+  if(name==='PHO') currentTheme = 'SPACE';
+  else if(name==='RAMEN') currentTheme = 'ARCADE';
+  else currentTheme = 'FOOD';
+  if(audioCtx && musicOn){ resetMusicClocks(); }
+}
+
+/* ========== Start / Reset ========== */
+let fuel=100;
+function reset(advance=false){
+  if(state==="intro") return;
+  if(advance){ if(state==="win"){ level=(level+1)%levelDefs.length; } applyLevel(level); }
+  Object.assign(lander,{ x:W*0.5, y:120, vx:0, vy:0.05, ang:Math.PI/2, thrust:false, left:false, right:false });
+  fuel=100; state="play";
+}
+function startGame(){
+  document.getElementById('overlay').style.display='none';
+  if(!audioCtx){ initAudio(); }
+  applyLevel(0);
+  if(raf) cancelAnimationFrame(raf);
+  score=0; reset(false); startMusic(); loop();
+}
+document.getElementById('musicBtn').addEventListener('click', toggleMusic);
+
+/* ========== Scoring ========== */
+function addScore(mult){
+  const gained = Math.round((100 + Math.round(fuel/10)) * mult);
+  score += gained;
+  hudMsg.textContent = `Good landing! +${gained} (x${mult})  Next: ${levelDefs[(level+1)%levelDefs.length].name}`;
+}
+
+/* ========== Crisp lines ========== */
+function useCrispLines(){
+  ctx.setTransform(1, 0, 0, 1, 0.5, 0.5);
+  ctx.lineCap = 'square';
+  ctx.lineJoin = 'miter';
+  ctx.miterLimit = 2.5;
+}
+
+/* ========== Draw loop ========== */
+function draw(){
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.clearRect(0,0,W,H);
+  useCrispLines();
+
+  // default draw color: white
+  setWhite();
+
+  // stars
+  for(const s of stars){ s.p+=s.s; const a=.5+.5*Math.sin(s.p); ctx.globalAlpha=a*s.a; ctx.fillRect(s.x,s.y,1,1); }
+  ctx.globalAlpha=1;
+
+  drawSilhouette();
+
+  // pads (visible; main landing is roof)
+  ctx.font='16px monospace'; ctx.textAlign='center';
+  for(const p of pads){
+    ctx.lineWidth=2; ctx.strokeStyle='#9ee7ff'; line(p.x1,p.y,p.x2,p.y);
+    ctx.setLineDash([8,6]); line(p.x1+8,p.y-6,p.x2-8,p.y-6); ctx.setLineDash([]);
+    setWhite();
+    ctx.fillText(`${p.mul}X`, (p.x1+p.x2)/2, p.y+20);
+  }
+
+  drawFoodStand();     // updates stallRoof
+  drawBrand();        // includes in-game tagline
+  drawLander();
+
+  if(state==="win"||state==="lose"){
+    ctx.textAlign='center';
+    ctx.font='20px system-ui, Arial';
+    ctx.fillText(state==="win" ? 'Nice landing!' : 'Crash!', W/2, 84);
+    ctx.font='14px system-ui, Arial';
+    ctx.fillText('Press Space', W/2, 106);
+  }
+}
+
+/* ========== Brand with in-game tagline ========== */
+function drawBrand(){
+  const baseX = W/2, baseY = H*0.18;
+  const sway = Math.sin(timeSec*1.1)*2;
+  const pulse = 0.65 + 0.35*Math.max(0,Math.cos(timeSec*0.8));
+  ctx.save(); ctx.globalAlpha = pulse; ctx.textAlign='center'; ctx.translate(sway, 0);
+  setWhite();
+  ctx.font='26px monospace';
+  ctx.fillText('LOST  BUT', baseX, baseY);
+  ctx.fillText('WELL  FED', baseX, baseY+26);
+  ctx.font='14px monospace';
+  ctx.fillText('Mapping the tastiest outposts in the universe.', baseX, baseY+26+20);
+  ctx.restore();
+}
+
+/* ========== Helpers (steam/lights/lantern) ========== */
+function drawSteam(cx, y, amp, len, count, speed){
+  for(let i=0;i<count;i++){
+    const phase = (i*0.8) + timeSec*speed;
+    const sway = Math.sin(phase)*amp;
+    ctx.globalAlpha = 0.6 - i*0.15;
+    line(cx - sway, y - i*8, cx - sway*0.3, y - len - i*8);
+    ctx.globalAlpha = 1;
+  }
+}
+function drawStringLights(x1, y, x2, n){
+  const span = x2 - x1;
+  for(let i=0;i<n;i++){
+    const px = x1 + (i/(n-1))*span;
+    const a = 0.4 + 0.6*Math.max(0, Math.cos(timeSec*2 + i*0.7));
+    ctx.globalAlpha = a; ctx.beginPath(); ctx.arc(px, y, 2, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+  }
+}
+function drawLantern(x, y, r, text){
+  line(x, y - 18, x, y - 6);
+  ctx.beginPath(); ctx.ellipse(x, y, r, r*0.82, 0, 0, Math.PI*2); ctx.stroke();
+  line(x - r*0.8, y - r*0.82, x + r*0.8, y - r*0.82);
+  line(x - r*0.8, y + r*0.82, x + r*0.8, y + r*0.82);
+  ctx.font = `${Math.round(r*1.2)}px monospace`; ctx.textAlign='center';
+  ctx.fillText(text || 'ラ', x, y + r*0.35);
+}
+
+/* ========== Food stands (smaller + cleaner) ========== */
+const STALL = { ROOF: 18, COUNTER: 42, PANEL: 56, CLEAR: 4, SCALE_W: 0.82 };
+let stallRoof = null; // single declaration used for roof landing
+
+function drawFoodStand(){
+  const p = pads[0]; if(!p) return;
+  const baseW = (p.x2 - p.x1);
+  const w = Math.max(160, baseW * STALL.SCALE_W);
+  const x = (p.x1 + p.x2) / 2;
+  const totalH = STALL.ROOF + STALL.COUNTER + STALL.PANEL;
+  const roofY  = p.y - totalH - STALL.CLEAR;
+
+  drawStall(x, roofY, w, levelDefs[level].name);
+  stallRoof = { x1: x - w/2, x2: x + w/2, y: roofY, mul: p.mul || 2 };
+}
+
+function drawStall(x, roofY, w, kind){
+  const top      = roofY + STALL.ROOF;
+  const panelTop = top + STALL.COUNTER;
+  const baseY    = panelTop + STALL.PANEL;
+
+  ctx.lineWidth   = 2;
+
+  // Roof + beam
+  line(x - w/2, roofY - 11, x - w/3.2, roofY - 24);
+  line(x - w/2, roofY,      x + w/2, roofY);
+  line(x + w/2, roofY,      x + w/2 + 20, roofY - 6);
+  line(x - w/2, top,        x + w/2, top);
+
+  // Posts
+  line(x - w/2, top, x - w/2, baseY);
+  line(x + w/2, top, x + w/2, baseY);
+
+  // Counter + front panel
+  line(x - w/2, panelTop, x + w/2, panelTop);
+  poly([{x:x-w/2+2,y:baseY-2},{x:x+w/2-2,y:baseY-2},{x:x+w/2-2,y:panelTop},{x:x-w/2+2,y:panelTop}]);
+
+  // Wheels
+  ctx.beginPath(); ctx.arc(x - w*0.34, baseY - 8, 14, 0, Math.PI*2);
+  ctx.arc(x + w*0.34, baseY - 8, 14, 0, Math.PI*2); ctx.stroke();
+
+  // Top sign
+  ctx.textAlign='center'; ctx.font='18px monospace';
+  ctx.fillText(kind, x, roofY - 6);
+
+  // Lights
+  drawStringLights(x - w/2 + 12, roofY + 2, x + w/2 - 12, 8);
+
+  // Thin interior details
+  ctx.lineWidth = 1;
+  line(x - w/6, top, x - w/6, panelTop);
+  line(x + w/10, top, x + w/10, panelTop);
+
+  // Vendor
+  line(x - w*0.06, panelTop, x + w*0.06, panelTop);
+  line(x - w*0.02, panelTop, x - w*0.02, panelTop - 24);
+  ctx.beginPath(); ctx.arc(x - w*0.02, panelTop - 33, 10, Math.PI*0.2, Math.PI*1.8); ctx.stroke();
+
+  // Lighter hatch
+  for(let i=-w/2+14;i<=w/2-14;i+=30) line(x+i, baseY-5, x+i, panelTop+5);
+
+  if(kind==='PHO'){
+    for(let i=0;i<3;i++){
+      const bx = x - w*0.26 + i*18, by = panelTop - 4;
+      ctx.beginPath(); ctx.arc(bx, by, 8, Math.PI*0.1, Math.PI*0.9); ctx.stroke();
+      line(bx-8, by, bx+8, by);
+      line(bx, by-8, bx, by-16);
+    }
+    poly([{x:x + w*0.06, y:panelTop},{x:x + w*0.24, y:panelTop},{x:x + w*0.24, y:panelTop - 16},{x:x + w*0.06, y:panelTop - 16}]);
+    drawSteam(x + w*0.15, panelTop - 18, 6, 16, 3, 0.75);
+  }
+  if(kind==='RAMEN'){
+    line(x - w/2 + 6, top, x + w/2 - 6, top);
+    const seg = (w - 12)/3; for(let i=0;i<3;i++){ const sx=x-w/2+6+i*seg; line(sx, top, sx, top+30); }
+    poly([{x:x - w*0.25, y:panelTop},{x:x - w*0.19, y:panelTop},{x:x - w*0.19, y:panelTop - 12},{x:x - w*0.25, y:panelTop - 12}]);
+    for(let yy=panelTop-4; yy>=panelTop-12; yy-=4) line(x - w*0.25, yy, x - w*0.19, yy);
+    poly([{x:x + w*0.06, y:panelTop},{x:x + w*0.24, y:panelTop},{x:x + w*0.24, y:panelTop - 16},{x:x + w*0.06, y:panelTop - 16}]);
+    drawSteam(x + w*0.15, panelTop - 18, 6, 16, 3, 0.9);
+    const lx = x - w/2 + 22, ly = roofY + 6, sway = Math.sin(timeSec*1.2)*3;
+    line(lx + sway, ly - 18, lx + sway, ly - 6);
+    ctx.beginPath(); ctx.ellipse(lx + sway, ly + 16, 11, 11*0.82, 0, 0, Math.PI*2); ctx.stroke();
+    line(lx - 8 + sway, ly + 16 - 9, lx + 8 + sway, ly + 16 - 9);
+    line(lx - 8 + sway, ly + 16 + 9, lx + 8 + sway, ly + 16 + 9);
+    ctx.font='12px monospace'; ctx.textAlign='center'; ctx.fillText('ラ', lx + sway, ly + 16 + 4);
+  }
+  if(kind==='TACOS'){
+    poly([{x:x + w*0.06, y:panelTop},{x:x + w*0.24, y:panelTop},{x:x + w*0.24, y:panelTop - 16},{x:x + w*0.06, y:panelTop - 16}]);
+    for(let gx=x+w*0.08; gx<=x+w*0.22; gx+=12) line(gx, panelTop, gx, panelTop-16);
+    drawSteam(x + w*0.15, panelTop - 18, 6, 16, 3, 0.8);
+    poly([{x:x - w*0.07, y:panelTop - 2},{x:x - w*0.02, y:panelTop - 2},{x:x - w*0.02, y:panelTop - 10},{x:x - w*0.07, y:panelTop - 10}]);
+    poly([{x:x - w*0.26, y:panelTop - 8},{x:x - w*0.20, y:panelTop - 8},{x:x - w*0.20, y:panelTop - 18},{x:x - w*0.26, y:panelTop - 18}]);
+  }
+}
+
+/* ========== Lander visuals ========== */
+function drawLander(){
+  const cx=lander.x, cy=lander.y;
+  ctx.save(); ctx.translate(cx,cy); ctx.rotate(lander.ang - Math.PI/2);
+  const L=36;
+  line(-4, 6, -24, L); line(4, 6, 24, L);
+  line(-30, L, -12, L); line(12, L, 30, L);
+  poly([{x:-10,y:10},{x:10,y:10},{x:14,y:26},{x:-14,y:26}]);
+  poly([{x:-24,y:-2},{x:24,y:-2},{x:28,y:8},{x:18,y:10},{x:-18,y:10},{x:-28,y:8}]);
+  poly([{x:-18,y:-26},{x:18,y:-26},{x:22,y:-14},{x:18,y:-6},{x:-18,y:-6},{x:-22,y:-14}]);
+  poly([{x:-6,y:-16},{x:6,y:-16},{x:6,y:-10},{x:-6,y:-10}]);
+  line(0,-26,0,-38); line(0,-38,10,-44);
+  if(keys['ArrowUp']||keys['KeyW']||lander.thrust){
+    ctx.beginPath(); ctx.moveTo(-6,26); ctx.lineTo(0,36+Math.random()*6); ctx.lineTo(6,26); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/* ========== Update / physics with ROOF LANDING ========== */
+function update(dt){
+  elapsed += dt; timeSec += dt;
+  if(state!=="play") return;
+
+  const thrustOn=(keys['ArrowUp']||keys['KeyW']||lander.thrust) && fuel>0;
+
+  let rot=0; if(keys['ArrowLeft']||keys['KeyA']||keys['KeyQ']||lander.left) rot-=1;
+  if(keys['ArrowRight']||keys['KeyD']||keys['KeyE']||lander.right) rot+=1;
+  lander.ang += rot * rotBase * (thrustOn ? rotBoost : 1);
+
+  if(thrustOn){
+    const tx=-Math.cos(lander.ang), ty=-Math.sin(lander.ang);
+    lander.vx += tx*thrustA; lander.vy += ty*thrustA; fuel=Math.max(0,fuel-0.18);
+  }
+  setThruster(thrustOn);
+
+  lander.vy += gravity; lander.x += lander.vx; lander.y += lander.vy;
+  if(lander.x<20||lander.x>W-20) lander.vx*=-0.5;
+  if(lander.y<20){ lander.y=20; lander.vy=0; }
+
+  const feet=landerFeet();
+
+  // Roof landing first
+  if(stallRoof && feet.x > stallRoof.x1 && feet.x < stallRoof.x2 && feet.y >= stallRoof.y-1){
+    const v=Math.abs(lander.vy), h=Math.abs(lander.vx), a=Math.abs(lander.ang - Math.PI/2);
+    lander.y = stallRoof.y - legLength() - 2; // snap to roof
+    if(v<=limits.vMax && h<=limits.hMax && a<=limits.ang){ state="win"; setThruster(false); beep(880,0.16); addScore(stallRoof.mul); }
+    else { state="lose"; setThruster(false); crashBeep(); hudMsg.textContent='Hard landing'; }
+    return;
+  }
+
+  // Ground collision
+  const groundY=terrainYAt(feet.x);
+  if(feet.y >= groundY - 1){
+    state="lose"; setThruster(false); crashBeep(); hudMsg.textContent='Crash';
+  }
+
+  // HUD
+  hudL.textContent = `SCORE ${String(score).padStart(5,'0')}   TIME ${elapsed.toFixed(2)}   FUEL ${Math.round(fuel)}`;
+  const altitude = Math.max(0, Math.round((stallRoof ? Math.min(terrainYAt(lander.x), stallRoof.y) : terrainYAt(lander.x)) - lander.y - legLength()));
+  hudR.textContent = `ALTITUDE ${String(altitude).padStart(4,' ')}\nHORIZ SPEED ${(lander.vx).toFixed(2)}\nVERT SPEED ${(lander.vy).toFixed(2)}`;
+}
+
+/* ========== Loop ========== */
+function loop(ts=0){
+  if(lastTs==null) lastTs=ts;
+  const dt=Math.min(0.05,(ts-lastTs)/1000); lastTs=ts;
+  scheduleMusic();
+  update(dt); draw();
+  raf=requestAnimationFrame(loop);
+}
+
+/* ========== Start / Controls ========== */
+document.getElementById('play').addEventListener('click', ()=>{ state="play"; if(!audioCtx){ initAudio(); } startGame(); });
+window.addEventListener('keydown', e=>{ if(state==="intro"&&(e.code==='Enter'||e.code==='Space')) startGame(); });
+window.addEventListener('keyup', e=>{
+  if((state==="win"||state==="lose") && e.code==='Space'){
+    if(state==="win" && level===levelDefs.length-1) level=-1;
+    reset(true);
+  }
+});
+  </script>
+</body>
+</html>
